@@ -1,8 +1,8 @@
 bl_info = {
     "name": "Export UV as Sewing Pattern",
     "author": "Gemini",
-    "version": (5, 2),
-    "blender": (4, 0, 0),
+    "version": (5, 3),
+    "blender": (5, 0, 1),
     "location": "View3D > Sidebar > Sewing",
     "description": "Exports UV islands as an SVG sewing pattern using native exact boundary packing.",
     "category": "Import-Export",
@@ -59,6 +59,12 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
         name="Draw Page Boundaries",
         default=True,
         description="Include blue dashed lines indicating physical pages"
+    )
+
+    draw_sewing_line: bpy.props.BoolProperty(
+        name="Draw Sewing Line",
+        default=True,
+        description="Include the inner dashed line indicating the actual UV boundary"
     )
 
     def invoke(self, context, event):
@@ -310,12 +316,14 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
             
             svg_lines.append('<g>')
             if self.seam_allowance_cm > 0:
-                svg_lines.append(f'<polygon points="{pts}" fill="none" stroke="black" stroke-width="{stroke_width:.4f}" stroke-linejoin="round"/>')
-                svg_lines.append(f'<polygon points="{pts}" fill="white" stroke="white" stroke-width="{inner_sw:.4f}" stroke-linejoin="round"/>')
+                svg_lines.append(f'<polygon points="{pts}" fill="none" stroke="black" stroke-width="{stroke_width:.4f}" />')
+                svg_lines.append(f'<polygon points="{pts}" fill="white" stroke="white" stroke-width="{inner_sw:.4f}" />')
             else:
                 svg_lines.append(f'<polygon points="{pts}" fill="white" stroke="none"/>')
                 
-            svg_lines.append(f'<polygon points="{pts}" fill="none" stroke="black" stroke-width="0.05" stroke-dasharray="0.3,0.3" stroke-linejoin="round"/>')
+            if self.draw_sewing_line:
+                svg_lines.append(f'<polygon points="{pts}" fill="none" stroke="black" stroke-width="0.05" stroke-dasharray="0.3,0.3" />')
+            
             svg_lines.append('</g>')
 
         svg_lines.append('</svg>')
