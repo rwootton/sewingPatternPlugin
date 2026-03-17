@@ -12,6 +12,36 @@ import bpy
 import bmesh
 import math
 
+import sys
+import subprocess
+import importlib
+import site
+
+def install_and_import_shapely():
+    try:
+        import shapely
+    except ImportError:
+        python_exe = sys.executable
+        
+        # Ensure pip is installed
+        subprocess.check_call([python_exe, "-m", "ensurepip"])
+        
+        # Install to the user site-packages to bypass Admin permission errors
+        subprocess.check_call([python_exe, "-m", "pip", "install", "--user", "shapely"])
+        
+        # Add the new user site-packages directory to Blender's path
+        user_site = site.getusersitepackages()
+        if user_site not in sys.path:
+            sys.path.append(user_site)
+            
+        # Force Python to rescan for newly installed modules
+        importlib.invalidate_caches()
+
+install_and_import_shapely()
+
+import shapely
+from shapely.geometry import Polygon
+
 class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
     """Export UV layout as SVG with exact boundary packing and tiling"""
     bl_idname = "export_mesh.uv_sewing_pattern"
@@ -306,20 +336,24 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
                 svg_lines.append(f'<rect x="{rx:.4f}" y="{ry:.4f}" width="{rw:.4f}" height="{rh:.4f}" fill="none" stroke="#add8e6" stroke-width="0.1" stroke-dasharray="0.5,0.5"/>')
 
         for path in paths:
+            cut_path = list(Polygon(path).buffer(self.seam_allowance_cm, join_style=2).exterior.coords)
             points_str = []
             for p in path:
                 x = p[0] + shift_x
                 y = p[1] + shift_y 
                 points_str.append(f"{x:.4f},{y:.4f}")
+
+            cut_points_str = []
+            for p in cut_path:
+                x = p[0] + shift_x
+                y = p[1] + shift_y 
+                cut_points_str.append(f"{x:.4f},{y:.4f}")
             
             pts = " ".join(points_str)
+            cut_pts = " ".join(cut_points_str)
             
             svg_lines.append('<g>')
-            if self.seam_allowance_cm > 0:
-                svg_lines.append(f'<polygon points="{pts}" fill="none" stroke="black" stroke-width="{stroke_width:.4f}" />')
-                svg_lines.append(f'<polygon points="{pts}" fill="white" stroke="white" stroke-width="{inner_sw:.4f}" />')
-            else:
-                svg_lines.append(f'<polygon points="{pts}" fill="white" stroke="none"/>')
+            svg_lines.append(f'<polygon points="{cut_pts}" fill="none" stroke="black" stroke-width="0.05" />')
                 
             if self.draw_sewing_line:
                 svg_lines.append(f'<polygon points="{pts}" fill="none" stroke="black" stroke-width="0.05" stroke-dasharray="0.3,0.3" />')
