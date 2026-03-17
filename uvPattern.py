@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Export UV as Sewing Pattern",
     "author": "Gemini",
-    "version": (5, 3),
+    "version": (5, 6),
     "blender": (5, 0, 1),
     "location": "View3D > Sidebar > Sewing",
-    "description": "Exports UV islands as an SVG sewing pattern using native exact boundary packing.",
+    "description": "Exports UV islands as an SVG sewing pattern with manually placed notches via Mark Sharp.",
     "category": "Import-Export",
 }
 
@@ -22,28 +22,19 @@ def install_and_import_shapely():
         import shapely
     except ImportError:
         python_exe = sys.executable
-        
-        # Ensure pip is installed
         subprocess.check_call([python_exe, "-m", "ensurepip"])
-        
-        # Install to the user site-packages to bypass Admin permission errors
         subprocess.check_call([python_exe, "-m", "pip", "install", "--user", "shapely"])
-        
-        # Add the new user site-packages directory to Blender's path
         user_site = site.getusersitepackages()
         if user_site not in sys.path:
             sys.path.append(user_site)
-            
-        # Force Python to rescan for newly installed modules
         importlib.invalidate_caches()
 
 install_and_import_shapely()
 
 import shapely
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, Point
 
 class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
-    """Export UV layout as SVG with exact boundary packing and tiling"""
     bl_idname = "export_mesh.uv_sewing_pattern"
     bl_label = "Export Sewing Pattern (SVG)"
     bl_options = {'REGISTER', 'UNDO'}
@@ -60,41 +51,35 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
     seam_allowance_cm: bpy.props.FloatProperty(
         name="Seam Allowance (cm)",
         default=1.0,
-        description="Size of the seam allowance in centimeters",
         min=0.0
     )
     
     padding_cm: bpy.props.FloatProperty(
         name="Island Padding (cm)",
         default=0.5,
-        description="Extra empty space between islands",
         min=0.0
     )
     
     page_width_cm: bpy.props.FloatProperty(
         name="Page Width (cm)",
         default=21.0,
-        description="Printable width of a single page",
         min=5.0
     )
 
     page_height_cm: bpy.props.FloatProperty(
         name="Page Height (cm)",
         default=28.0,
-        description="Printable height of a single page",
         min=5.0
     )
 
     draw_page_boundaries: bpy.props.BoolProperty(
         name="Draw Page Boundaries",
-        default=True,
-        description="Include blue dashed lines indicating physical pages"
+        default=True
     )
 
     draw_sewing_line: bpy.props.BoolProperty(
         name="Draw Sewing Line",
-        default=True,
-        description="Include the inner dashed line indicating the actual UV boundary"
+        default=True
     )
 
     def invoke(self, context, event):
@@ -112,7 +97,6 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
             self.report({'ERROR'}, "Mesh has no active UV map.")
             return {'CANCELLED'}
 
-        # 1. Duplicate active object
         bpy.ops.object.mode_set(mode='OBJECT')
         bpy.ops.object.select_all(action='DESELECT')
         original_obj.select_set(True)
@@ -121,7 +105,6 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
         bpy.ops.object.duplicate(linked=False)
         temp_obj = context.active_object
 
-        # 2. Filter Duplicates & Mirrors
         bm = bmesh.new()
         bm.from_mesh(temp_obj.data)
         bm.transform(temp_obj.matrix_world)
@@ -188,8 +171,7 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
         bm.to_mesh(temp_obj.data)
         bm.free()
 
-        # 3. Native Packing & Scale Calibration
-        desired_spacing_cm = self.padding_cm + (self.seam_allowance_cm * 2)
+        desired_spacing_cm = (self.padding_cm + (self.seam_allowance_cm * 2)) * 1.25
         margin_value = 0.001
         
         target_area = next((a for a in context.screen.areas if a.type == 'IMAGE_EDITOR'), None)
@@ -205,7 +187,7 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
         space_data = target_area.spaces.active
 
         try:
-            for i in range(2):
+            for i in range(4):
                 bpy.ops.object.mode_set(mode='EDIT')
                 bpy.ops.mesh.select_all(action='SELECT')
                 
@@ -236,13 +218,15 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
             if original_type:
                 target_area.type = original_type
 
-        # 4. Extract Final Layout
         bpy.ops.object.mode_set(mode='OBJECT')
         bm = bmesh.new()
         bm.from_mesh(temp_obj.data)
         uv_layer = bm.loops.layers.uv.active
 
         edge_counts = {}
+        edge_to_3d_idx = {}
+        sharp_3d_edges = set()
+        
         for face in bm.faces:
             for loop in face.loops:
                 uv1 = loop[uv_layer].uv
@@ -250,10 +234,20 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
                 p1 = (round(uv1.x * uv_to_cm, 4), round((1.0 - uv1.y) * uv_to_cm, 4))
                 p2 = (round(uv2.x * uv_to_cm, 4), round((1.0 - uv2.y) * uv_to_cm, 4))
                 if p1 == p2: continue
-                edge = tuple(sorted([p1, p2]))
-                edge_counts[edge] = edge_counts.get(edge, 0) + 1
+                edge_key = tuple(sorted([p1, p2]))
+                edge_counts[edge_key] = edge_counts.get(edge_key, 0) + 1
+                edge_to_3d_idx[edge_key] = loop.edge.index
+                
+                # Check if edge is marked Sharp in Blender
+                if not loop.edge.smooth:
+                    sharp_3d_edges.add(loop.edge.index)
                 
         boundaries = [e for e, c in edge_counts.items() if c == 1]
+        
+        # Map IDs only to edges that were marked sharp
+        notch_id_map = {}
+        for i, e_idx in enumerate(sorted(list(sharp_3d_edges))):
+            notch_id_map[e_idx] = str(i + 1)
         
         adj = {}
         for p1, p2 in boundaries:
@@ -287,7 +281,6 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
             
         bm.free()
         
-        # Clean up temp object
         bpy.data.objects.remove(temp_obj, do_unlink=True)
         context.view_layer.objects.active = original_obj
         original_obj.select_set(True)
@@ -296,18 +289,16 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
             self.report({'ERROR'}, "No patterns generated.")
             return {'CANCELLED'}
 
-        # 5. Tile & Generate SVG
         min_x = min(p[0] for path in paths for p in path)
         max_x = max(p[0] for path in paths for p in path)
         min_y = min(p[1] for path in paths for p in path)
         max_y = max(p[1] for path in paths for p in path)
         
-        gap = self.padding_cm / 2.0
-        shift_x = gap - min_x
-        shift_y = gap - min_y
+        shift_x = (self.padding_cm / 2.0) + self.seam_allowance_cm - min_x
+        shift_y = (self.padding_cm / 2.0) + self.seam_allowance_cm - min_y
         
-        max_svg_width = (max_x - min_x) + (gap * 2)
-        max_svg_height = (max_y - min_y) + (gap * 2)
+        max_svg_width = (max_x - min_x) + (self.seam_allowance_cm * 2) + self.padding_cm
+        max_svg_height = (max_y - min_y) + (self.seam_allowance_cm * 2) + self.padding_cm
         
         cols = math.ceil(max_svg_width / self.page_width_cm)
         rows = math.ceil(max_svg_height / self.page_height_cm)
@@ -322,10 +313,6 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
                 ry = r * self.page_height_cm
                 page_rects.append((rx, ry, self.page_width_cm, self.page_height_cm))
 
-        stroke_width = self.seam_allowance_cm * 2 
-        outline_thickness = 0.05
-        inner_sw = max(0, stroke_width - (outline_thickness * 2))
-        
         svg_lines = []
         svg_lines.append('<?xml version="1.0" standalone="no"?>')
         svg_lines.append(f'<svg width="{max_svg_width:.2f}cm" height="{max_svg_height:.2f}cm" viewBox="0 0 {max_svg_width:.2f} {max_svg_height:.2f}" version="1.1" xmlns="http://www.w3.org/2000/svg">')
@@ -336,7 +323,10 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
                 svg_lines.append(f'<rect x="{rx:.4f}" y="{ry:.4f}" width="{rw:.4f}" height="{rh:.4f}" fill="none" stroke="#add8e6" stroke-width="0.1" stroke-dasharray="0.5,0.5"/>')
 
         for path in paths:
-            cut_path = list(Polygon(path).buffer(self.seam_allowance_cm, join_style=2).exterior.coords)
+            poly = Polygon(path)
+            cut_poly = poly.buffer(self.seam_allowance_cm, join_style=2)
+            cut_path = list(cut_poly.exterior.coords)
+            
             points_str = []
             for p in path:
                 x = p[0] + shift_x
@@ -358,6 +348,40 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
             if self.draw_sewing_line:
                 svg_lines.append(f'<polygon points="{pts}" fill="none" stroke="black" stroke-width="0.05" stroke-dasharray="0.3,0.3" />')
             
+            for i in range(len(path) - 1):
+                p1 = path[i]
+                p2 = path[i+1]
+                edge_key = tuple(sorted([p1, p2]))
+                
+                if edge_key in edge_to_3d_idx:
+                    e_idx = edge_to_3d_idx[edge_key]
+                    if e_idx in notch_id_map:
+                        n_id = notch_id_map[e_idx]
+                        
+                        mid_x = (p1[0] + p2[0]) / 2.0
+                        mid_y = (p1[1] + p2[1]) / 2.0
+                        mid_pt = Point(mid_x, mid_y)
+                        
+                        if self.seam_allowance_cm > 0:
+                            dist = cut_poly.exterior.project(mid_pt)
+                            cut_pt = cut_poly.exterior.interpolate(dist)
+                            
+                            sx1, sy1 = mid_x + shift_x, mid_y + shift_y
+                            sx2, sy2 = cut_pt.x + shift_x, cut_pt.y + shift_y
+                            
+                            svg_lines.append(f'<line x1="{sx1:.4f}" y1="{sy1:.4f}" x2="{sx2:.4f}" y2="{sy2:.4f}" stroke="black" stroke-width="0.05" />')
+                            
+                            dx = sx1 - sx2
+                            dy = sy1 - sy2
+                            length = math.hypot(dx, dy)
+                            if length > 0:
+                                idx = sx1 + (dx/length) * 0.3
+                                idy = sy1 + (dy/length) * 0.3
+                                svg_lines.append(f'<text x="{idx:.4f}" y="{idy:.4f}" font-size="0.3" font-family="sans-serif" text-anchor="middle" dominant-baseline="middle">{n_id}</text>')
+                        else:
+                            sx1, sy1 = mid_x + shift_x, mid_y + shift_y
+                            svg_lines.append(f'<text x="{sx1:.4f}" y="{sy1:.4f}" font-size="0.3" font-family="sans-serif" text-anchor="middle" dominant-baseline="middle">{n_id}</text>')
+
             svg_lines.append('</g>')
 
         svg_lines.append('</svg>')
