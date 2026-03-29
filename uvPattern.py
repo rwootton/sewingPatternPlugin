@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Export UV as Sewing Pattern",
     "author": "Gemini",
-    "version": (5, 6),
+    "version": (5, 7),
     "blender": (5, 0, 1),
     "location": "View3D > Sidebar > Sewing",
     "description": "Exports UV islands as an SVG sewing pattern with manually placed notches via Mark Sharp.",
@@ -50,25 +50,25 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
     
     seam_allowance_cm: bpy.props.FloatProperty(
         name="Seam Allowance (cm)",
-        default=1.0,
+        default=0.7,
         min=0.0
     )
     
     padding_cm: bpy.props.FloatProperty(
         name="Island Padding (cm)",
-        default=0.5,
+        default=0.2,
         min=0.0
     )
     
     page_width_cm: bpy.props.FloatProperty(
         name="Page Width (cm)",
-        default=21.0,
+        default=100,
         min=5.0
     )
 
     page_height_cm: bpy.props.FloatProperty(
         name="Page Height (cm)",
-        default=28.0,
+        default=60,
         min=5.0
     )
 
@@ -346,7 +346,7 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
             svg_lines.append(f'<polygon points="{cut_pts}" fill="none" stroke="black" stroke-width="0.05" />')
                 
             if self.draw_sewing_line:
-                svg_lines.append(f'<polygon points="{pts}" fill="none" stroke="black" stroke-width="0.05" stroke-dasharray="0.3,0.3" />')
+                svg_lines.append(f'<polygon points="{pts}" fill="none" stroke="gray" stroke-width="0.05" />')
             
             for i in range(len(path) - 1):
                 p1 = path[i]
