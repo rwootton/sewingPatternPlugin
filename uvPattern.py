@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Export UV as Sewing Pattern",
     "author": "Gemini",
-    "version": (5, 7),
+    "version": (5, 8),
     "blender": (5, 0, 1),
     "location": "View3D > Sidebar > Sewing",
-    "description": "Exports UV islands as an SVG sewing pattern with manually placed notches via Mark Sharp.",
+    "description": "Exports UV islands as an SVG sewing pattern from all selected objects.",
     "category": "Import-Export",
 }
 
@@ -82,27 +82,41 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
         default=True
     )
 
+    remove_duplicates: bpy.props.BoolProperty(
+        name="Remove Duplicates/Mirrors",
+        default=True,
+        description="Automatically remove identical or mirrored mesh islands"
+    )
+
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
     def execute(self, context):
-        original_obj = context.active_object
+        # 1. Gather all selected valid meshes
+        selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH' and obj.data.uv_layers.active]
         
-        if not original_obj or original_obj.type != 'MESH':
-            self.report({'ERROR'}, "Active object must be a mesh.")
+        if not selected_meshes:
+            self.report({'ERROR'}, "No selected meshes with active UV maps found.")
             return {'CANCELLED'}
 
-        if not original_obj.data.uv_layers.active:
-            self.report({'ERROR'}, "Mesh has no active UV map.")
-            return {'CANCELLED'}
+        original_active = context.active_object
+        original_selection = context.selected_objects[:]
 
+        # 2. Duplicate and combine them into a single temporary mesh
         bpy.ops.object.mode_set(mode='OBJECT')
         bpy.ops.object.select_all(action='DESELECT')
-        original_obj.select_set(True)
-        context.view_layer.objects.active = original_obj
         
+        for obj in selected_meshes:
+            obj.select_set(True)
+            
         bpy.ops.object.duplicate(linked=False)
+        temp_objects = context.selected_objects[:]
+        context.view_layer.objects.active = temp_objects[0]
+        
+        if len(temp_objects) > 1:
+            bpy.ops.object.join()
+            
         temp_obj = context.active_object
 
         bm = bmesh.new()
@@ -110,6 +124,7 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
         bm.transform(temp_obj.matrix_world)
         uv_layer = bm.loops.layers.uv.active
 
+        # 3. Island Identification
         adj_faces = {f: set() for f in bm.faces}
         for edge in bm.edges:
             if len(edge.link_faces) == 2:
@@ -141,33 +156,37 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
                             queue.append(neighbor)
                 islands.append(island_faces)
 
-        faces_to_delete = []
-        seen_signatures = set()
-        for island_faces in islands:
-            perim_3d = 0.0
-            area_3d = 0.0
-            edge_lengths = []
-            island_edge_counts = {}
-            for f in island_faces:
-                area_3d += f.calc_area()
-                for loop in f.loops:
-                    edge = loop.edge
-                    island_edge_counts[edge] = island_edge_counts.get(edge, 0) + 1
-            for edge, count in island_edge_counts.items():
-                if count == 1:
-                    l = edge.calc_length()
-                    perim_3d += l
-                    edge_lengths.append(round(l, 3))
+        # 4. Optional Duplicate Filtering
+        if self.remove_duplicates:
+            faces_to_delete = []
+            seen_signatures = set()
+            for island_faces in islands:
+                perim_3d = 0.0
+                area_3d = 0.0
+                edge_lengths = []
+                island_edge_counts = {}
+                for f in island_faces:
+                    area_3d += f.calc_area()
+                    for loop in f.loops:
+                        edge = loop.edge
+                        island_edge_counts[edge] = island_edge_counts.get(edge, 0) + 1
+                for edge, count in island_edge_counts.items():
+                    if count == 1:
+                        l = edge.calc_length()
+                        perim_3d += l
+                        edge_lengths.append(round(l, 3))
 
-            edge_lengths.sort()
-            signature = (round(area_3d, 3), round(perim_3d, 3), tuple(edge_lengths))
-            
-            if signature not in seen_signatures:
-                seen_signatures.add(signature)
-            else:
-                faces_to_delete.extend(island_faces)
+                edge_lengths.sort()
+                signature = (round(area_3d, 3), round(perim_3d, 3), tuple(edge_lengths))
+                
+                if signature not in seen_signatures:
+                    seen_signatures.add(signature)
+                else:
+                    faces_to_delete.extend(island_faces)
 
-        bmesh.ops.delete(bm, geom=faces_to_delete, context='FACES')
+            if faces_to_delete:
+                bmesh.ops.delete(bm, geom=faces_to_delete, context='FACES')
+                
         bm.to_mesh(temp_obj.data)
         bm.free()
 
@@ -238,13 +257,11 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
                 edge_counts[edge_key] = edge_counts.get(edge_key, 0) + 1
                 edge_to_3d_idx[edge_key] = loop.edge.index
                 
-                # Check if edge is marked Sharp in Blender
                 if not loop.edge.smooth:
                     sharp_3d_edges.add(loop.edge.index)
                 
         boundaries = [e for e, c in edge_counts.items() if c == 1]
         
-        # Map IDs only to edges that were marked sharp
         notch_id_map = {}
         for i, e_idx in enumerate(sorted(list(sharp_3d_edges))):
             notch_id_map[e_idx] = str(i + 1)
@@ -281,9 +298,12 @@ class EXPORT_OT_uv_sewing_pattern(bpy.types.Operator):
             
         bm.free()
         
+        # Cleanup temp object and restore selection
         bpy.data.objects.remove(temp_obj, do_unlink=True)
-        context.view_layer.objects.active = original_obj
-        original_obj.select_set(True)
+        for obj in original_selection:
+            obj.select_set(True)
+        if original_active:
+            context.view_layer.objects.active = original_active
 
         if not paths:
             self.report({'ERROR'}, "No patterns generated.")
